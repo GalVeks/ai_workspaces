@@ -59,6 +59,90 @@ class WorkspaceService {
     return textParts.join(' ');
   }
 
+  // Generate formatted prompt (moved from component to service)
+  generateFormattedPrompt(workspace) {
+    if (!workspace?.sections) {
+      return '<AgentInstructions>\n  <!-- Workspace data not available -->\n</AgentInstructions>';
+    }
+
+    const sections = workspace.sections;
+    const knowledgeBaseDescriptions = {
+      'DBT': 'For understanding data model dependencies, lineage, and project structure',
+      'Confluence': 'For accessing team knowledge, processes, and best practices',
+      'Jira': 'For tracking data-related tickets, issues, and project status',
+      'Asana': 'For tracking data-related tickets, issues, and project status'
+    };
+
+    const safeGet = (obj, path, defaultValue = '') => {
+      try {
+        return path.split('.').reduce((current, key) => current?.[key], obj) ?? defaultValue;
+      } catch {
+        return defaultValue;
+      }
+    };
+
+    const safeArray = (arr) => Array.isArray(arr) ? arr : [];
+
+    const getItemValue = (item) => {
+      if (typeof item === 'object' && item !== null) {
+        return item.content || '';
+      }
+      return item || '';
+    };
+
+    const knowledgeBases = safeArray(sections.knowledgeBases);
+    const responsibilities = safeArray(sections.responsibilities).filter(r => getItemValue(r)?.trim());
+    const responseGuidelines = safeArray(sections.responseGuidelines).filter(g => getItemValue(g)?.trim());
+    const examples = safeArray(sections.examples).filter(ex => ex.question && ex.answer);
+
+    return `<AgentInstructions>
+  <Role>
+    <Name>Debbie T.</Name>
+    <Description>${safeGet(sections, 'role.description', 'Not specified')}</Description>
+  </Role>
+  
+  <Goal>
+    <Primary>${safeGet(sections, 'goal', 'Not specified')}</Primary>
+  </Goal>
+  
+  <Capabilities>
+    <KnowledgeBases>
+${knowledgeBases.length > 0 ? knowledgeBases.map(kb => `      <Source name="${kb}">${knowledgeBaseDescriptions[kb] || 'Integration tool'}</Source>`).join('\n') : '      <Source>No knowledge bases selected</Source>'}
+    </KnowledgeBases>
+  </Capabilities>
+  
+  <Responsibilities>
+${responsibilities.length > 0 ? responsibilities.map(resp => `    <Responsibility>${getItemValue(resp)}</Responsibility>`).join('\n') : '    <Responsibility>No responsibilities defined</Responsibility>'}
+  </Responsibilities>
+  
+  <CommunicationStyle>
+    <Tone>${safeGet(sections, 'communicationStyle.tone', 'Not specified')}</Tone>
+    <Personality>${safeGet(sections, 'communicationStyle.personality', 'Not specified')}</Personality>
+    <Approach>${safeGet(sections, 'communicationStyle.approach', 'Not specified')}</Approach>
+  </CommunicationStyle>
+  
+  <ResponseGuidelines>
+${responseGuidelines.length > 0 ? responseGuidelines.map(guideline => `    <Guideline>${getItemValue(guideline)}</Guideline>`).join('\n') : '    <Guideline>No guidelines defined</Guideline>'}
+  </ResponseGuidelines>
+
+  <TriggerConditions>
+    <When>${safeGet(sections, 'triggers', 'Not specified')}</When>
+  </TriggerConditions>
+
+  <SubjectMatterExpert>
+    <Profile>${safeGet(sections, 'subjectMatterExpert', 'Not specified')}</Profile>
+    <Contact>${safeGet(sections, 'subjectMatterExpertEmail', 'Not specified')}</Contact>
+  </SubjectMatterExpert>
+
+  <Examples>
+${examples.length > 0 ? examples.map(ex => `    <Example>
+      <Question>${ex.question}</Question>
+      <Answer>${ex.answer}</Answer>
+    </Example>`).join('\n') : '    <Example>\n      <Question>No examples provided</Question>\n      <Answer>Please add example Q&A pairs</Answer>\n    </Example>'}
+  </Examples>
+</AgentInstructions>`;
+  }
+
   // Save workspace to Pinecone
   async saveWorkspace(workspace) {
     try {
@@ -67,6 +151,9 @@ class WorkspaceService {
       // Generate embedding
       const searchableText = this.createSearchableText(workspace);
       const embedding = await this.generateEmbedding(searchableText);
+
+      // Generate formatted prompt
+      const formattedPrompt = this.generateFormattedPrompt(workspace);
 
       console.log('✅ Embedding generated, saving to Pinecone...');
 
@@ -81,6 +168,8 @@ class WorkspaceService {
         knowledgeBases: (workspace.sections?.knowledgeBases || []).join(','),
         triggers: workspace.sections?.triggers || '',
         workspaceData: JSON.stringify(workspace),
+        formattedPrompt: formattedPrompt, // Store formatted prompt in metadata
+        promptLength: formattedPrompt.length,
       };
 
       // Save to Pinecone
@@ -104,13 +193,14 @@ class WorkspaceService {
         throw new Error(`Pinecone error: ${response.status} - ${errorText}`);
       }
 
-      console.log('✅ Workspace saved to Pinecone successfully!');
+      console.log('✅ Workspace and formatted prompt saved to Pinecone successfully!');
 
       return {
         ...workspace,
         vectorId: vectorId,
         lastSaved: new Date().toISOString(),
         syncedToPinecone: true,
+        formattedPrompt: formattedPrompt, // Include in return for immediate use
       };
 
     } catch (error) {
@@ -156,6 +246,8 @@ class WorkspaceService {
               score: match.score,
               lastSaved: match.metadata.updatedAt,
               syncedToPinecone: true,
+              formattedPrompt: match.metadata.formattedPrompt, // Include formatted prompt
+              promptLength: match.metadata.promptLength,
             };
           } catch (e) {
             console.error('Error parsing workspace data:', e);
@@ -211,6 +303,48 @@ class WorkspaceService {
     }
   }
 
+  // Get formatted prompt for a specific workspace
+  async getFormattedPrompt(workspaceId) {
+    try {
+      const vectorId = workspaceId.toString().startsWith('workspace_') ? workspaceId : `workspace_${workspaceId}`;
+      
+      console.log(`🔍 Fetching formatted prompt for: ${vectorId}`);
+
+      // Query specific workspace by ID
+      const queryResponse = await fetch(`${this.pineconeHost}/query`, {
+        method: 'POST',
+        headers: {
+          'Api-Key': this.pineconeApiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          vector: new Array(1536).fill(0.1),
+          topK: 1,
+          includeMetadata: true,
+          filter: { id: { $eq: vectorId } }
+        }),
+      });
+
+      if (!queryResponse.ok) {
+        throw new Error(`Pinecone error: ${queryResponse.status}`);
+      }
+
+      const data = await queryResponse.json();
+      const match = data.matches?.[0];
+
+      if (match?.metadata?.formattedPrompt) {
+        console.log('✅ Retrieved formatted prompt from Pinecone');
+        return match.metadata.formattedPrompt;
+      } else {
+        throw new Error('Formatted prompt not found in Pinecone metadata');
+      }
+
+    } catch (error) {
+      console.error('❌ Error fetching formatted prompt:', error);
+      throw error;
+    }
+  }
+
   // Search workspaces semantically
   async searchWorkspaces(query, options = {}) {
     try {
@@ -252,6 +386,8 @@ class WorkspaceService {
               vectorId: match.id,
               score: match.score,
               relevanceScore: Math.round(match.score * 100),
+              formattedPrompt: match.metadata.formattedPrompt, // Include formatted prompt in search results
+              promptLength: match.metadata.promptLength,
             };
           } catch (e) {
             console.error('Error parsing workspace data:', e);
@@ -401,69 +537,13 @@ const DebbieWorkspace = () => {
   };
 
   const generateFormattedPrompt = (workspace) => {
-    if (!workspace?.sections) {
-      return '<AgentInstructions>\n  <!-- Workspace data not available -->\n</AgentInstructions>';
+    // If the workspace has a cached formatted prompt from Pinecone, use it
+    if (workspace?.formattedPrompt) {
+      return workspace.formattedPrompt;
     }
-
-    const sections = workspace.sections;
-    const knowledgeBaseDescriptions = {
-      'DBT': 'For understanding data model dependencies, lineage, and project structure',
-      'Confluence': 'For accessing team knowledge, processes, and best practices',
-      'Jira': 'For tracking data-related tickets, issues, and project status',
-      'Asana': 'For tracking data-related tickets, issues, and project status'
-    };
-
-    const knowledgeBases = safeArray(sections.knowledgeBases);
-    const responsibilities = safeArray(sections.responsibilities).filter(r => getItemValue(r)?.trim());
-    const responseGuidelines = safeArray(sections.responseGuidelines).filter(g => getItemValue(g)?.trim());
-    const examples = safeArray(sections.examples).filter(ex => ex.question && ex.answer);
-
-    return `<AgentInstructions>
-  <Role>
-    <Name>Debbie T.</Name>
-    <Description>${safeGet(sections, 'role.description', 'Not specified')}</Description>
-  </Role>
-  
-  <Goal>
-    <Primary>${safeGet(sections, 'goal', 'Not specified')}</Primary>
-  </Goal>
-  
-  <Capabilities>
-    <KnowledgeBases>
-${knowledgeBases.length > 0 ? knowledgeBases.map(kb => `      <Source name="${kb}">${knowledgeBaseDescriptions[kb] || 'Integration tool'}</Source>`).join('\n') : '      <Source>No knowledge bases selected</Source>'}
-    </KnowledgeBases>
-  </Capabilities>
-  
-  <Responsibilities>
-${responsibilities.length > 0 ? responsibilities.map(resp => `    <Responsibility>${getItemValue(resp)}</Responsibility>`).join('\n') : '    <Responsibility>No responsibilities defined</Responsibility>'}
-  </Responsibilities>
-  
-  <CommunicationStyle>
-    <Tone>${safeGet(sections, 'communicationStyle.tone', 'Not specified')}</Tone>
-    <Personality>${safeGet(sections, 'communicationStyle.personality', 'Not specified')}</Personality>
-    <Approach>${safeGet(sections, 'communicationStyle.approach', 'Not specified')}</Approach>
-  </CommunicationStyle>
-  
-  <ResponseGuidelines>
-${responseGuidelines.length > 0 ? responseGuidelines.map(guideline => `    <Guideline>${getItemValue(guideline)}</Guideline>`).join('\n') : '    <Guideline>No guidelines defined</Guideline>'}
-  </ResponseGuidelines>
-
-  <TriggerConditions>
-    <When>${safeGet(sections, 'triggers', 'Not specified')}</When>
-  </TriggerConditions>
-
-  <SubjectMatterExpert>
-    <Profile>${safeGet(sections, 'subjectMatterExpert', 'Not specified')}</Profile>
-    <Contact>${safeGet(sections, 'subjectMatterExpertEmail', 'Not specified')}</Contact>
-  </SubjectMatterExpert>
-
-  <Examples>
-${examples.length > 0 ? examples.map(ex => `    <Example>
-      <Question>${ex.question}</Question>
-      <Answer>${ex.answer}</Answer>
-    </Example>`).join('\n') : '    <Example>\n      <Question>No examples provided</Question>\n      <Answer>Please add example Q&A pairs</Answer>\n    </Example>'}
-  </Examples>
-</AgentInstructions>`;
+    
+    // Otherwise, generate it using the service method
+    return workspaceService.generateFormattedPrompt(workspace);
   };
 
   const updateWorkspaceSection = (section, value) => {
@@ -947,6 +1027,11 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
                         ) : (
                           <div className="text-xs text-orange-600 mt-1">⚠️ Not synced</div>
                         )}
+                        {workspace.promptLength && (
+                          <div className="text-xs text-gray-400 mt-1">
+                            Prompt: {workspace.promptLength} chars
+                          </div>
+                        )}
                         {workspace.lastSaved && (
                           <div className="text-xs text-gray-400 mt-1">
                             Saved: {new Date(workspace.lastSaved).toLocaleTimeString()}
@@ -1322,6 +1407,11 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
                     <h3 className="font-semibold text-gray-900 flex items-center">
                       <Zap className="h-4 w-4 mr-2 text-blue-500" />
                       Formatted Prompt
+                      {currentWorkspace.formattedPrompt && (
+                        <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
+                          Cached from Pinecone
+                        </span>
+                      )}
                     </h3>
                   </div>
                   <div className="p-6">
