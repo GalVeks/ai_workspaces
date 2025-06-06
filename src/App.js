@@ -883,7 +883,7 @@ const DebbieWorkspace = () => {
                 <Bot className="h-8 w-8 text-blue-600" />
                 <h1 className="text-xl font-bold text-gray-900">Debbie T. Workspace</h1>
               </div>
-              <div className="text-sm text-gray-500">Build custom prompts for your data assistant</div>
+              <div className="text-sm text-gray-500">Build custom prompts for Bill data assistant</div>
             </div>
             <div className="flex items-center space-x-3">
               {/* Refresh Button */}
